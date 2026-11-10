@@ -1,77 +1,94 @@
 package one.digitalinnovation.gof.service.impl;
 
-import java.util.Optional;
-
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import one.digitalinnovation.gof.exception.ClienteInvalidoException;
+import one.digitalinnovation.gof.exception.ClienteNaoEncontradoException;
 import one.digitalinnovation.gof.model.Cliente;
 import one.digitalinnovation.gof.model.ClienteRepository;
 import one.digitalinnovation.gof.model.Endereco;
 import one.digitalinnovation.gof.model.EnderecoRepository;
 import one.digitalinnovation.gof.service.ClienteService;
 import one.digitalinnovation.gof.service.ViaCepService;
+import one.digitalinnovation.gof.validation.ValidadorCliente;
 
 /**
- * Implementação da <b>Strategy</b> {@link ClienteService}, a qual pode ser
- * injetada pelo Spring (via {@link Autowired}). Com isso, como essa classe é um
- * {@link Service}, ela será tratada como um <b>Singleton</b>.
+ * Implementação da <b>Strategy</b> {@link ClienteService}, injetada pelo
+ * Spring. Como essa classe é um {@link Service}, ela é tratada como um
+ * <b>Singleton</b>.
  * 
- * @author falvojr
+ * Evoluções em relação ao projeto original: injeção via construtor, validação
+ * com <b>Chain of Responsibility</b> e erros de domínio (404 e 400) no lugar
+ * de falhas genéricas.
  */
 @Service
 public class ClienteServiceImpl implements ClienteService {
 
-	// Singleton: Injetar os componentes do Spring com @Autowired.
-	@Autowired
-	private ClienteRepository clienteRepository;
-	@Autowired
-	private EnderecoRepository enderecoRepository;
-	@Autowired
-	private ViaCepService viaCepService;
-	
+	private final ClienteRepository clienteRepository;
+	private final EnderecoRepository enderecoRepository;
+	private final ViaCepService viaCepService;
+	private final ValidadorCliente validadorCliente;
+
+	// Singleton: o Spring injeta as dependências (únicas) pelo construtor.
+	public ClienteServiceImpl(ClienteRepository clienteRepository, EnderecoRepository enderecoRepository,
+			ViaCepService viaCepService, ValidadorCliente validadorCliente) {
+		this.clienteRepository = clienteRepository;
+		this.enderecoRepository = enderecoRepository;
+		this.viaCepService = viaCepService;
+		this.validadorCliente = validadorCliente;
+	}
+
 	// Strategy: Implementar os métodos definidos na interface.
 	// Facade: Abstrair integrações com subsistemas, provendo uma interface simples.
 
 	@Override
 	public Iterable<Cliente> buscarTodos() {
-		// Buscar todos os Clientes.
 		return clienteRepository.findAll();
 	}
 
 	@Override
 	public Cliente buscarPorId(Long id) {
-		// Buscar Cliente por ID.
-		Optional<Cliente> cliente = clienteRepository.findById(id);
-		return cliente.get();
+		return clienteRepository.findById(id).orElseThrow(() -> new ClienteNaoEncontradoException(id));
 	}
 
 	@Override
 	public void inserir(Cliente cliente) {
+		validadorCliente.validar(cliente);
 		salvarClienteComCep(cliente);
 	}
 
 	@Override
 	public void atualizar(Long id, Cliente cliente) {
-		// Buscar Cliente por ID, caso exista:
-		Optional<Cliente> clienteBd = clienteRepository.findById(id);
-		if (clienteBd.isPresent()) {
-			salvarClienteComCep(cliente);
+		if (!clienteRepository.existsById(id)) {
+			throw new ClienteNaoEncontradoException(id);
 		}
+		validadorCliente.validar(cliente);
+		// Mantém o id da URL, senão o save() criaria um novo cliente.
+		cliente.setId(id);
+		salvarClienteComCep(cliente);
 	}
 
 	@Override
 	public void deletar(Long id) {
-		// Deletar Cliente por ID.
+		if (!clienteRepository.existsById(id)) {
+			throw new ClienteNaoEncontradoException(id);
+		}
 		clienteRepository.deleteById(id);
 	}
 
 	private void salvarClienteComCep(Cliente cliente) {
-		// Verificar se o Endereco do Cliente já existe (pelo CEP).
+		// Verificar se o Endereco do Cliente já existe (pelo CEP). O ViaCEP devolve o
+		// CEP com hífen (00000-000), e é assim que ele fica salvo; por isso a busca usa
+		// o mesmo formato, senão nunca acharíamos o endereço já persistido.
 		String cep = cliente.getEndereco().getCep();
-		Endereco endereco = enderecoRepository.findById(cep).orElseGet(() -> {
+		String cepFormatado = cep.substring(0, 5) + "-" + cep.substring(5);
+		Endereco endereco = enderecoRepository.findById(cepFormatado).orElseGet(() -> {
 			// Caso não exista, integrar com o ViaCEP e persistir o retorno.
 			Endereco novoEndereco = viaCepService.consultarCep(cep);
+			// Para um CEP inexistente o ViaCEP responde {"erro": true}, sem o campo cep.
+			if (novoEndereco == null || novoEndereco.getCep() == null) {
+				throw new ClienteInvalidoException("CEP não encontrado: " + cep);
+			}
 			enderecoRepository.save(novoEndereco);
 			return novoEndereco;
 		});
